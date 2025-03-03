@@ -136,11 +136,23 @@ calibot/
 └── pyproject.toml         # Project dependencies
 ```
 
+## Roadmap
+
+The following features are planned for future releases:
+
+- **Conflict Detection:** Check for overlapping events when scheduling new appointments
+- **Batch Operations:** Support for deleting or updating multiple events simultaneously
+- **Participant Management:** Add email lists to quickly populate event participants
+
 ## Security Considerations
 
 - OAuth 2.0 is used for secure Google account authentication
 - User tokens are stored locally and are not shared
 - The application only requests necessary Calendar API permissions
+
+## Contribution
+
+Contributions are welcome! Feel free to open a pull request with your improvements or suggestions.
 
 ## License
 
