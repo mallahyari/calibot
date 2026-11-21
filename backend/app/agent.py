@@ -60,7 +60,7 @@ WEEKDAYS = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "ש�
 
 # כלים שמחזירים מידע ומתבצעים מיד
 # העדפות מתבצעות מיד — הן זולות, הפיכות, ולא נוגעות ביומן
-READ_TOOLS = {"query_events", "list_tasks", "search_events", "meeting_stats",
+READ_TOOLS = {"search_email", "read_email", "query_events", "list_tasks", "search_events", "meeting_stats",
               "remember_preference", "forget_preference",
               "web_search", "search_knowledge", "list_scheduled",
               "check_email", "workout_stats",
@@ -157,9 +157,29 @@ TOOLS = [
     }},
     {"type": "function", "function": {
         "name": "check_email",
-        "description": ("מיילים שלא נקראו מהיממה האחרונה. לשאלות כמו "
-                        "'יש לי מיילים חדשים?' או 'מה מחכה לי בתיבה?'"),
+        "description": ("מיילים מהיממה האחרונה בתיבה הראשית (גם שנקראו). לשאלות כמו "
+                        "'יש לי מיילים חדשים?' או 'מה הגיע היום?'"),
         "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "search_email",
+        "description": (
+            "חיפוש מיילים לפי שולח, נושא או תוכן — כולל מיילים שכבר נקראו. "
+            "לשאלות כמו 'מה כתב לי אייל?' או 'תמצאי את החשבונית מבזק'. "
+            "שמות בעברית: חפש גם בתעתיק לאנגלית, כי שם השולח לרוב באנגלית "
+            "(למשל 'אייל OR eyal OR eyall'). אחרי שמצאת — read_email לתוכן המלא."),
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "תחביר Gmail או מילים, למשל 'from:eyal OR אייל'"},
+            "days": {"type": "integer", "description": "כמה ימים אחורה (ברירת מחדל 30)"},
+            "unread_only": {"type": "boolean"},
+        }, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "read_email",
+        "description": "קורא מייל מלא לפי id (מתוך check_email או search_email).",
+        "parameters": {"type": "object", "properties": {
+            "email_id": {"type": "string"},
+        }, "required": ["email_id"]},
     }},
     {"type": "function", "function": {
         "name": "workout_stats",

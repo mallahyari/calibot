@@ -46,7 +46,8 @@ def _looks_promotional(email: dict) -> bool:
 def _fetch_sync(query: str, limit: int) -> list[dict]:
     service = _service()
     if service is None:
-        return []
+        # לא "אין מיילים" — אין חיבור. שקט כאן הסתיר תקלות בעבר.
+        raise RuntimeError("אין חיבור ל-Gmail (צריך /reauth?)")
 
     listing = service.users().messages().list(
         userId="me", q=query, maxResults=limit,
@@ -56,7 +57,7 @@ def _fetch_sync(query: str, limit: int) -> list[dict]:
     for ref in listing.get("messages", []):
         msg = service.users().messages().get(
             userId="me", id=ref["id"], format="metadata",
-            metadataHeaders=["From", "Subject"],
+            metadataHeaders=["From", "Subject", "Date"],
         ).execute()
         headers = {h["name"]: h["value"]
                    for h in msg.get("payload", {}).get("headers", [])}
@@ -69,7 +70,9 @@ def _fetch_sync(query: str, limit: int) -> list[dict]:
             "from": sender,
             "from_addr": headers.get("From", ""),
             "subject": headers.get("Subject", "(ללא נושא)"),
-            "snippet": (msg.get("snippet") or "")[:120],
+            "snippet": (msg.get("snippet") or "")[:200],
+            "date": headers.get("Date", ""),
+            "unread": "UNREAD" in (msg.get("labelIds") or []),
         })
     return emails
 
@@ -128,3 +131,33 @@ async def unread_recent(limit: int = 5) -> list[dict]:
     except Exception as exc:
         logger.warning("קריאת מייל נכשלה: %s", exc)
         return []
+
+
+async def recent_inbox(limit: int = 10) -> list[dict]:
+    """
+    מיילים מהיממה האחרונה בתיבה הראשית — גם כאלה שכבר נפתחו בטלפון.
+    לטריאז': הכפילויות נמנעות בטבלת email_seen, לא בסטטוס 'לא נקרא'.
+    """
+    emails = await asyncio.to_thread(
+        _fetch_sync,
+        "in:inbox newer_than:1d -category:promotions -category:social",
+        limit * 2)
+    return [m for m in emails if not _looks_promotional(m)][:limit]
+
+
+async def search(query: str = "", days: int = 30, limit: int = 8,
+                 unread_only: bool = False) -> list[dict]:
+    """
+    חיפוש חופשי בתיבה — לפי שולח, נושא או תוכן, כולל מיילים שנקראו.
+    query בתחביר Gmail או מילים חופשיות ("אייל", "from:eyal", "חשבונית").
+    """
+    q = (query or "").strip()
+    q = f"{q} newer_than:{max(1, min(int(days or 30), 365))}d"
+    if unread_only:
+        q += " is:unread"
+    try:
+        emails = await asyncio.to_thread(_fetch_sync, q, max(1, min(int(limit or 8), 20)))
+    except Exception as exc:
+        logger.warning("חיפוש מייל נכשל: %s", exc)
+        return [{"error": str(exc)}]
+    return emails or [{"info": f"לא נמצאו מיילים עבור: {query}"}]

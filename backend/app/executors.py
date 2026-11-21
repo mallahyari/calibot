@@ -52,6 +52,8 @@ def set_calendar_service(service, owner_chat_id: int = None) -> None:
     _calendar = service
     _owner_chat_id = owner_chat_id
     agent.set_read_executor("query_events", fetch_events)
+    agent.set_read_executor("search_email", search_email)
+    agent.set_read_executor("read_email", read_email)
     from app import features
     features.register(service, owner_chat_id)
     agent.set_read_executor("list_tasks", list_tasks)
@@ -506,9 +508,28 @@ def set_prompt_job_remover(fn) -> None:
 
 
 async def check_email() -> list[dict]:
+    """מיילים מהיממה האחרונה — שנקראו ושלא (שדה unread מסמן)."""
     from app import gmail_reader
-    emails = await gmail_reader.unread_recent(limit=5)
-    return emails or [{"info": "אין מיילים חדשים ביממה האחרונה."}]
+    try:
+        emails = await gmail_reader.recent_inbox(limit=8)
+    except Exception as exc:
+        return [{"error": f"לא הצלחתי לקרוא את Gmail: {exc}"}]
+    return emails or [{"info": "לא הגיעו מיילים לתיבה הראשית ביממה האחרונה."}]
+
+
+async def search_email(query: str, days: int = 30, unread_only: bool = False) -> list[dict]:
+    from app import gmail_reader
+    return await gmail_reader.search(query, days=days, unread_only=unread_only)
+
+
+async def read_email(email_id: str) -> dict:
+    from app import gmail_reader
+    full = await gmail_reader.read_full(email_id)
+    if not full:
+        return {"error": "לא הצלחתי לפתוח את המייל."}
+    full = dict(full)
+    full["body"] = (full.get("body") or "")[:6000]
+    return full
 
 
 # --- אימונים: זיהוי לפי הצבע שאנחנו עצמנו קובעים, או מילות מפתח ---

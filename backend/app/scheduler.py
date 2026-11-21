@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import re
 import logging
 import os
 from dataclasses import dataclass
@@ -250,63 +251,106 @@ def _autopilot() -> bool:
     return os.getenv("EMAIL_AUTOPILOT", "0") == "1"
 
 
+def _email_seen(message_id: str) -> bool:
+    with db.get_conn() as conn:
+        return conn.execute("SELECT 1 FROM email_seen WHERE message_id = ?",
+                            (message_id,)).fetchone() is not None
+
+
+_triage_fail_notified = False
+
+
 async def email_triage() -> None:
     """
     סורק מיילים חדשים ומחליט: תשובה (אוטומטית או עם אישור, לפי
     EMAIL_AUTOPILOT), התראה, או כלום.
+
+    לקחים מנובמבר 2026:
+    - מסמנים "נסרק" רק אחרי טיפול. קודם סומן לפני ההחלטה, וכשהמודל נכשל
+      המייל אבד בשקט.
+    - ההחלטה בלי כלים (complete_text). עם 45 כלים המודל העדיף לפעמים
+      לקרוא לכלי במקום להחזיר JSON.
+    - גם מיילים שכבר נפתחו בטלפון נסרקים (לא רק is:unread).
+    - כשאין חיבור ל-Gmail — מודיעים פעם אחת, לא שותקים.
     """
+    global _triage_fail_notified
     if _deps is None:
         return
-    emails = await gmail_reader.unread_recent(limit=6)
-    fresh = [m for m in emails if db.email_mark_seen(m["id"])]
+    try:
+        emails = await gmail_reader.recent_inbox(limit=10)
+    except Exception as exc:
+        logger.error("טריאז': קריאת Gmail נכשלה: %s", exc)
+        if not _triage_fail_notified:
+            _triage_fail_notified = True
+            await _deps.send(_deps.chat_id,
+                             f"⚠️ אני לא מצליחה לקרוא את המיילים שלך: {exc}\n"
+                             "אם זה נמשך — שלח /reauth.")
+        return
+    _triage_fail_notified = False
+
+    fresh = [m for m in emails if not _email_seen(m["id"])]
     if not fresh:
         return
+    logger.info("טריאז': %s מיילים חדשים", len(fresh))
 
     from app import agent as _agent
-    for m in fresh:
+    import json as _json
+    for m in reversed(fresh):           # מהישן לחדש
         full = await gmail_reader.read_full(m["id"]) or {}
         body = (full.get("body") or m["snippet"])[:1500]
         prompt = (
             "מייל נכנס אל רון:\n"
             f"מאת: {m['from_addr']}\nנושא: {m['subject']}\nגוף:\n{body}\n\n"
-            "החלט מה לעשות והחזר JSON בלבד:\n"
-            '{"action": "reply", "draft": "טיוטת תשובה קצרה ומנומסת בשפת המייל"}\n'
-            'או {"action": "notify", "reason": "למה רון צריך לראות את זה"}\n'
+            "החלט מה לעשות והחזר JSON בלבד, בלי טקסט נוסף:\n"
+            '{"action": "reply", "draft": "טיוטת תשובה קצרה ומנומסת בשפת המייל", '
+            '"summary": "משפט אחד בעברית: מה המייל"}\n'
+            'או {"action": "notify", "summary": "משפט אחד בעברית: מה המייל ולמה זה חשוב"}\n'
             'או {"action": "ignore"}\n'
             "reply רק כשהתשובה ברורה ובטוחה (אישור הגעה, תיאום פשוט, תודה). "
-            "כל דבר אישי, כספי או לא ודאי -> notify. ספאם/אוטומטי -> ignore."
+            "כל מייל מאדם אמיתי שאינו ברור מאליו, אישי, כספי או לא ודאי -> notify. "
+            "ignore רק לספאם, ניוזלטרים והודעות אוטומטיות."
         )
+        decision = None
         try:
-            resp = await _agent._call_llm([{"role": "user", "content": prompt}])
-            raw = resp["choices"][0]["message"]["content"] or ""
+            raw = await _agent.complete_text(prompt, max_tokens=1200) or ""
             raw = raw.replace("```json", "").replace("```", "").strip()
-            import json as _json
-            decision = _json.loads(raw)
+            mobj = re.search(r"\{.*\}", raw, re.S)
+            decision = _json.loads(mobj.group(0) if mobj else raw)
         except Exception as exc:
             logger.warning("טריאז' נכשל עבור %s: %s", m["subject"][:40], exc)
-            continue
+
+        if not isinstance(decision, dict):
+            # המודל לא החליט — עדיף התראה פשוטה מאשר לאבד מייל
+            decision = {"action": "notify", "summary": m["snippet"][:150]}
 
         action = decision.get("action")
-        if action == "reply" and decision.get("draft"):
-            if _autopilot():
-                result = await gmail_sender.send_reply(m["id"], decision["draft"])
+        summary = decision.get("summary") or decision.get("reason") or ""
+        try:
+            if action == "reply" and decision.get("draft"):
+                if _autopilot():
+                    result = await gmail_sender.send_reply(m["id"], decision["draft"])
+                    await _deps.send(
+                        _deps.chat_id,
+                        (f'📧✈️ עניתי במקומך למייל מ{m["from"]}: "{m["subject"]}"\n'
+                         f'---\n{decision["draft"][:400]}\n---\n{result}'))
+                else:
+                    await confirm.propose(
+                        _deps.chat_id, "reply_email",
+                        {"email_id": m["id"], "body": decision["draft"]},
+                        (f'📧 מייל מ{m["from"]}: "{m["subject"]}"\n'
+                         + (f"{summary}\n" if summary else "")
+                         + f'ניסחתי תשובה — לשלוח?\n---\n{decision["draft"][:400]}'),
+                    )
+            elif action != "ignore":
                 await _deps.send(
                     _deps.chat_id,
-                    (f'📧✈️ עניתי במקומך למייל מ{m["from"]}: "{m["subject"]}"\n'
-                     f'---\n{decision["draft"][:400]}\n---\n{result}'))
-            else:
-                await confirm.propose(
-                    _deps.chat_id, "reply_email",
-                    {"email_id": m["id"], "body": decision["draft"]},
-                    (f'📧 מייל מ{m["from"]}: "{m["subject"]}"\n'
-                     f'ניסחתי תשובה — לשלוח?\n---\n{decision["draft"][:400]}'),
-                )
-        elif action == "notify":
-            reason = decision.get("reason", "")
-            await _deps.send(
-                _deps.chat_id,
-                f'📧 מייל שכדאי שתראה — מ{m["from"]}: "{m["subject"]}"\n'
-                f'{reason}\n(אם תרצה שאענה — תגיד לי מה לכתוב)')
+                    f'📧 מייל חדש מ{m["from"]}: "{m["subject"]}"\n'
+                    + (f"{summary}\n" if summary else "")
+                    + "(רוצה שאענה? תגיד לי מה לכתוב)")
+            db.email_mark_seen(m["id"])
+        except Exception as exc:
+            # לא מסמנים כנסרק — ננסה שוב בסבב הבא
+            logger.error("טריאז': שליחת התראה נכשלה עבור %s: %s", m["subject"][:40], exc)
 
 
 async def evening_review() -> None:
@@ -497,7 +541,7 @@ def start_scheduler(deps: Deps) -> AsyncIOScheduler:
         )
 
     scheduler.add_job(
-        email_triage, CronTrigger(hour="8-22/2", minute=10),
+        email_triage, CronTrigger(hour="7-22", minute="*/20"),
         id="email_triage", coalesce=True, misfire_grace_time=1800,
     )
 
