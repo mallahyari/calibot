@@ -10,6 +10,7 @@ Whisper מקבל ogg ישירות, תומך בעברית, והמכסה החינ�
 עדיין בלי Whisper מקומי — ל-droplet יש היסטוריית OOM.
 """
 
+import asyncio
 import logging
 import os
 from typing import Optional
@@ -72,35 +73,98 @@ async def download_voice(file_id: str) -> Optional[tuple[bytes, str]]:
         return None
 
 
-async def transcribe(audio: bytes, mime: str = "audio/ogg") -> Optional[str]:
-    """תמלול דרך Whisper של Groq. מחזיר טקסט או None בכישלון."""
-    if not GROQ_API_KEY:
-        logger.error("GROQ_API_KEY חסר — אין תמלול")
-        return None
+FALLBACK_WHISPER = os.getenv("WHISPER_FALLBACK_MODEL", "whisper-large-v3")
 
+
+async def _groq_whisper(audio: bytes, mime: str, model: str,
+                        with_prompt: bool) -> tuple[Optional[str], str]:
+    """(טקסט, שגיאה). השגיאה כוללת את גוף התשובה של Groq — 400 לבד לא אומר כלום."""
     ext = "ogg" if "ogg" in mime else "mp3"
-
+    data = {"model": model, "language": "he", "temperature": "0",
+            "response_format": "json"}
+    if with_prompt:
+        data["prompt"] = TRANSCRIBE_PROMPT
     try:
         async with httpx.AsyncClient(timeout=TRANSCRIBE_TIMEOUT) as client:
             resp = await client.post(
                 GROQ_TRANSCRIBE_URL,
                 headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                 files={"file": (f"voice.{ext}", audio, mime)},
-                data={
-                    "model": WHISPER_MODEL,
-                    "language": "he",
-                    "prompt": TRANSCRIBE_PROMPT,
-                    "temperature": "0",
-                    "response_format": "json",
-                },
+                data=data,
             )
-            resp.raise_for_status()
-            text = (resp.json().get("text") or "").strip()
-            return text or None
-
+        if resp.status_code >= 400:
+            return None, f"{model}: {resp.status_code} {resp.text[:300]}"
+        text = (resp.json().get("text") or "").strip()
+        return (text or None), ("" if text else f"{model}: תמלול ריק")
     except Exception as exc:
-        logger.error("תמלול נכשל: %s", exc)
+        return None, f"{model}: {exc}"
+
+
+def _to_mp3(audio: bytes) -> Optional[bytes]:
+    """המרה עם ffmpeg — לקבצים ש-Groq לא מזהה את הפורמט שלהם."""
+    import shutil, subprocess
+    if not shutil.which("ffmpeg"):
         return None
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+             "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", "-f", "mp3", "pipe:1"],
+            input=audio, capture_output=True, timeout=120, check=True)
+        return out.stdout or None
+    except Exception as exc:
+        logger.warning("המרת אודיו נכשלה: %s", exc)
+        return None
+
+
+async def _gemini_transcribe(audio: bytes) -> Optional[str]:
+    """גיבוי אחרון: תמלול ב-Gemini (Vertex), אותו חשבון שירות של התמונות."""
+    try:
+        import base64
+        from app import vision
+        if vision._load_credentials() is None:
+            return None
+        text = await vision.vertex_call([
+            {"text": "תמלל את ההקלטה מילה במילה, בשפה שבה מדברים (בדרך כלל "
+                     "עברית). החזר רק את התמלול, בלי הקדמות."},
+            {"inline_data": {"mime_type": "audio/mp3",
+                             "data": base64.b64encode(audio).decode("ascii")}},
+        ], max_tokens=4096, timeout=120)
+        return (text or "").strip() or None
+    except Exception as exc:
+        logger.warning("תמלול Gemini נכשל: %s", exc)
+        return None
+
+
+async def transcribe(audio: bytes, mime: str = "audio/ogg") -> Optional[str]:
+    """
+    תמלול עם שרשרת גיבויים:
+      1. Groq Whisper (המודל המוגדר, עם רמז מילים)
+      2. אותו קובץ אחרי המרה ל-mp3, בלי רמז, במודל הגיבוי של Groq
+      3. Gemini ב-Vertex
+    כל כישלון נרשם עם הסיבה המלאה מהשרת.
+    """
+    errors = []
+    if GROQ_API_KEY:
+        text, err = await _groq_whisper(audio, mime, WHISPER_MODEL, True)
+        if text:
+            return text
+        errors.append(err)
+        mp3 = await asyncio.to_thread(_to_mp3, audio) or audio
+        text, err = await _groq_whisper(mp3, "audio/mpeg", FALLBACK_WHISPER, False)
+        if text:
+            logger.warning("תמלול הצליח רק בגיבוי Groq. שגיאה ראשונה: %s", errors[0])
+            return text
+        errors.append(err)
+    else:
+        errors.append("GROQ_API_KEY חסר")
+        mp3 = await asyncio.to_thread(_to_mp3, audio) or audio
+
+    text = await _gemini_transcribe(mp3)
+    if text:
+        logger.warning("תמלול הצליח רק ב-Gemini. שגיאות Groq: %s", " | ".join(errors))
+        return text
+    logger.error("תמלול נכשל בכל המסלולים: %s", " | ".join(errors))
+    return None
 
 
 def extract_voice(message: dict) -> Optional[dict]:
