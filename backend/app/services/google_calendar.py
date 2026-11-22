@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import os
 import pickle
 from google_auth_oauthlib.flow import Flow
-from google.auth.transport.requests import Request
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from googleapiclient.discovery import build
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -22,7 +22,13 @@ class GoogleCalendarService:
         self.credentials = None
         self.token_path = 'token.pickle'
         self.service = None
-        self.redirect_uri = f"http://{API_HOST}:{API_PORT}{OAUTH_REDIRECT_PATH}"
+        # בשרת, החזרה מגוגל חייבת להגיע לכתובת הציבורית — localhost
+        # של השרת אינו נגיש מהדפדפן של רון. מקומית נשאר localhost.
+        public = os.getenv("PUBLIC_URL", "").rstrip("/")
+        self.redirect_uri = (
+            f"{public}{OAUTH_REDIRECT_PATH}" if public
+            else f"http://{API_HOST}:{API_PORT}{OAUTH_REDIRECT_PATH}"
+        )
     
     def get_auth_url(self):
         """Generate and return the Google OAuth authorization URL."""
@@ -44,7 +50,15 @@ class GoogleCalendarService:
 
         # store client_config and redirect_uri to use in the callback function.
         with open("client_config.pickle", "wb") as f:
-            pickle.dump({"client_secrets_file": GOOGLE_CLIENT_SECRET_FILE, "scopes": GOOGLE_API_SCOPES, "redirect_uri": self.redirect_uri}, f)
+            pickle.dump({
+                "client_secrets_file": GOOGLE_CLIENT_SECRET_FILE,
+                "scopes": GOOGLE_API_SCOPES,
+                "redirect_uri": self.redirect_uri,
+                # PKCE: הספרייה מייצרת code_verifier בזמן authorization_url.
+                # ה-callback בונה אובייקט Flow חדש, ובלי לשמור אותו כאן
+                # החלפת ה-code נכשלת ב-"Missing code verifier".
+                "code_verifier": getattr(flow, "code_verifier", None),
+            }, f)
 
         return auth_url
 
@@ -74,6 +88,8 @@ class GoogleCalendarService:
                 scopes=client_config["scopes"],
                 redirect_uri=client_config["redirect_uri"]
             )
+            if client_config.get("code_verifier"):
+                flow.code_verifier = client_config["code_verifier"]
             flow.fetch_token(code=code)
             self.credentials = flow.credentials
 
@@ -151,7 +167,7 @@ class GoogleCalendarService:
         if self.credentials and self.credentials.expired and self.credentials.refresh_token:
             try:
                 logger.info("🔄 Refreshing expired credentials...")
-                self.credentials.refresh(Request())
+                self.credentials.refresh(GoogleAuthRequest())
                 with open(self.token_path, 'wb') as token:
                     pickle.dump(self.credentials, token)
                 logger.info("✅ Credentials refreshed successfully.")

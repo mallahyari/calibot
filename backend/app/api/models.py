@@ -1,25 +1,20 @@
+"""
+מחליף את backend/app/api/models.py.
+
+השינוי היחיד שחשוב: השדה callback_query. בלי זה FastAPI דוחה כל
+לחיצה על כפתור אישור, והשכבה שבנינו פשוט לא תעבוד.
+"""
+
+from typing import Any, Optional
+
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Union
+
 
 class TelegramUpdate(BaseModel):
-    update_id: int
-    message: Optional[Dict] = None
+    update_id: Optional[int] = None
+    message: Optional[dict[str, Any]] = None
+    edited_message: Optional[dict[str, Any]] = None
+    callback_query: Optional[dict[str, Any]] = None
 
-class TelegramMessage(BaseModel):
-    chat_id: int
-    message: str
-    message_id: int
-
-class ConfirmationRequest(BaseModel):
-    chat_id: int
-    confirmed: bool
-    event_data: Dict[str, Any]
-
-class EventResponse(BaseModel):
-    success: bool
-    message: str
-    confirmation_needed: bool
-    event_data: Optional[Dict[str, Any]] = None
-    event_id: Optional[str] = None
-    event_link: Optional[str] = None
-    events: Optional[List[Dict[str, Any]]] = None
+    class Config:
+        extra = "allow"     # טלגרם מוסיף שדות מדי פעם; לא ניפול בגללם

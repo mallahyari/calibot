@@ -15,3 +15,16 @@ wheels/
 /backend/*.pickle
 /backend/*.txt
 /backend/client.json
+
+credentials.json
+token.pickle
+*.db
+*.pickle
+oauth_state.txt
+backups/
+
+nikol-bot-*.json
+vertex-sa.json
+*-sa.json
+
+deploy/
